@@ -1,6 +1,8 @@
 # SmartEnviMonitoring
 A weather reporting system that periodly read temperature and humidity and send the values to web server [SmartEnviMonitoring_Web](https://github.com/Xellosi/SmartEnviMonitoring_Web).
 
+![image](https://github.com/Xellosi/SmartEnviMonitoring_Devices/blob/main/Resources/device.jpg)
+
 # Componments and Connections
 - stm32F407 discovery board
 - DHT11
@@ -9,7 +11,7 @@ A weather reporting system that periodly read temperature and humidity and send 
   > I2C1
 - ESP32-WROOM-32D
   > UART2
-  >
+  
 # Setup
 Change the following variables in main.c to the url and ip address of the server you set up.
 - http_device_url
