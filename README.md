@@ -1,5 +1,5 @@
 # SmartEnviMonitoring
-A weather reporting system that periodly read temperature and humidity and send the values to web server [SmartEnviMonitoring_Web](https://github.com/Xellosi/SmartEnviMonitoring_Web).
+A weather reporting system that periodically reads temperature and humidity data and sends the values to the web server [SmartEnviMonitoring_Web](https://github.com/Xellosi/SmartEnviMonitoring_Web).
 
 ![image](https://github.com/Xellosi/SmartEnviMonitoring_Devices/blob/main/Resources/device.jpg)
 
