@@ -9,7 +9,7 @@ A weather reporting system that periodically reads temperature and humidity data
   > Data line: GPIO PA1
 - lcd1602 I2C
   > I2C1
-- ESP32-WROOM-32D
+- ESP32-WROOM-32D (ESP AT commands)
   > UART2
   
 # Setup
