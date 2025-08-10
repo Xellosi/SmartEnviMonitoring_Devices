@@ -54,9 +54,9 @@
 #define SEND_BUFFER_SIZE 256
 #define WAIT_RES_TIMEOUTMS ((uint16_t)5000)
 
-char http_device_url[] = "http://192.168.47.157:80/api/device";
-char http_weather_url[] = "http://192.168.47.157:80/api/weather";
-char server_ip[] = "192.168.47.157";
+char http_device_url[] = "http://172.17.238.18:80/api/device";
+char http_weather_url[] = "http://172.17.238.18:80/api/weather";
+char server_ip[] = "172.17.238.17";
 char mqtt_port[] = "1883";
 
 /* USER CODE END PD */

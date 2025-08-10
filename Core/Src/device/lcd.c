@@ -32,7 +32,7 @@ HAL_StatusTypeDef lcd_send_cmd(I2C_HandleTypeDef *i2chandle, char cmd) {
 	HAL_StatusTypeDef status = HAL_I2C_Master_Transmit(i2chandle, LCD_ADDR,
 			(uint8_t*) frame_data, 4, tranTimeout);
 
-	HAL_Delay(1);
+	HAL_Delay(10);
 
 	return status;
 }
@@ -49,38 +49,38 @@ HAL_StatusTypeDef lcd_send_data(I2C_HandleTypeDef *i2chandle, char data) {
 
 	HAL_StatusTypeDef status = HAL_I2C_Master_Transmit(i2chandle, LCD_ADDR,
 			(uint8_t*) frame_data, 4, tranTimeout);
-	HAL_Delay(1);
+	HAL_Delay(10);
 
 	return status;
 }
 
 void LCD_Clear(I2C_HandleTypeDef *i2chandle) {
 	lcd_send_cmd(i2chandle, 0x01);
-	HAL_Delay(1);
+	HAL_Delay(50);
 }
 
 void LCD_Init(I2C_HandleTypeDef *i2chandle) {
 	HAL_StatusTypeDef status = HAL_OK;
-	HAL_Delay(200);
+	HAL_Delay(100);
 	status = lcd_send_cmd(i2chandle, 0x30);
-	HAL_Delay(5);
+	HAL_Delay(10);
 	status = lcd_send_cmd(i2chandle, 0x30);
-	HAL_Delay(1);
+	HAL_Delay(10);
 	status = lcd_send_cmd(i2chandle, 0x30);
 	HAL_Delay(10);
 	status = lcd_send_cmd(i2chandle, 0x20);
-	HAL_Delay(10);
+	HAL_Delay(20);
 
 	status = lcd_send_cmd(i2chandle, 0x28);        //function set
-	HAL_Delay(1);
+	HAL_Delay(20);
 	status = lcd_send_cmd(i2chandle, 0x08);        //Display on/off
-	HAL_Delay(1);
+	HAL_Delay(20);
 	status = lcd_send_cmd(i2chandle, 0x01);        //clear display
-	HAL_Delay(1);
+	HAL_Delay(20);
 	status = lcd_send_cmd(i2chandle, 0x06);        //Enter mode
-	HAL_Delay(1);
+	HAL_Delay(20);
 	status = lcd_send_cmd(i2chandle, 0x0C);        //Display on/off
-	HAL_Delay(1);
+	HAL_Delay(20);
 }
 
 void LCD_Send_String(I2C_HandleTypeDef *i2chandle, char *str) {
@@ -88,10 +88,10 @@ void LCD_Send_String(I2C_HandleTypeDef *i2chandle, char *str) {
 	while (*tmp >= 32) {
 		lcd_send_data(i2chandle, *tmp);
 		//printf("%c",*tmp);
-		HAL_Delay(10);
+		HAL_Delay(20);
 		tmp++;
 	}
-	HAL_Delay(1);
+	HAL_Delay(10);
 }
 
 void LCD_Put_Cur(I2C_HandleTypeDef *i2chandle, uint8_t row, uint8_t col) {
@@ -104,14 +104,14 @@ ErrorStatus LCD_Refresh(I2C_HandleTypeDef *i2chandle, LCDContent_t* content){
 	}
 	content -> FirstLine[LCD_CHAR_NUM] = '\0';
 	content -> SecLine[LCD_CHAR_NUM] = '\0';
-	HAL_Delay(10);
+	HAL_Delay(20);
 	LCD_Clear(i2chandle);
 	LCD_Put_Cur(i2chandle, 0, 0);
-	HAL_Delay(10);
+	HAL_Delay(20);
 	LCD_Send_String(i2chandle, content -> FirstLine);
-	HAL_Delay(10);
+	HAL_Delay(20);
 	LCD_Put_Cur(i2chandle, 1, 0);
-	HAL_Delay(10);
+	HAL_Delay(20);
 	LCD_Send_String(i2chandle, content -> SecLine);
 
 	printf("%s\t%s\n",content -> FirstLine, content -> SecLine);
