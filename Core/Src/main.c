@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "FreeRTOS.h"
 #include "FreeRTOSConfig.h"
@@ -38,6 +39,8 @@
 #include "utils.h"
 #include "esp32at.h"
 #include "comm.h"
+#include "lwesp/lwesp.h"
+#include "lwesp/apps/lwesp_mqtt_client_api.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +56,7 @@
 #define RECV_BUFFER_SIZE 300
 #define SEND_BUFFER_SIZE 256
 #define WAIT_RES_TIMEOUTMS ((uint16_t)5000)
+#define RECONNECT_DELAY_MS ((uint16_t)5000)
 
 char http_device_url[] = "http://172.17.238.18:80/api/device";
 char http_weather_url[] = "http://172.17.238.18:80/api/weather";
@@ -85,6 +89,9 @@ DMA_HandleTypeDef hdma_usart2_rx;
 char device_id[DEVICE_UID_LEN];
 DateTime_t query_time;
 TimerHandle_t mstim;
+volatile bool server_ready = false;
+static volatile bool lwesp_initialized = false;
+static lwesp_mqtt_client_api_p mqtt_client = NULL;
 
 /* lcd */
 SemaphoreHandle_t lcd_mutex;
@@ -102,20 +109,12 @@ uint8_t send_buffer[SEND_BUFFER_SIZE];
 uint16_t send_data_len = 0;
 uint8_t recv_buffers[RECV_BUFFER_NUM][RECV_BUFFER_SIZE];
 uint16_t recv_sizes[RECV_BUFFER_NUM] = {0};
-void (*recv_callback)(const char*) = NULL;
-
-
-char res_waiting[RECV_BUFFER_SIZE];
-volatile bool res_receivced = false;
-char* target_res = NULL;
 
 volatile int recv_buffer_idx = 0;
 volatile int recv_read_idx = 0;
 
 volatile uint32_t meas_send_count = 0;
 volatile uint32_t meas_recv_count = 0;
-HAL_StatusTypeDef send_status;
-HAL_StatusTypeDef receive_status;
 
 /* os */
 const char *INIT_TASK_NAME = "Init";
@@ -138,13 +137,9 @@ static void MX_TIM13_Init(void);
 static void MX_I2S3_Init(void);
 /* USER CODE BEGIN PFP */
 BaseType_t RTC_SetValue(DateTime_t *datetime);
-BaseType_t ESP_Init(UART_HandleTypeDef *huart);
-BaseType_t Server_Conn(UART_HandleTypeDef *huart, CommHandle_t *hcomm);
-BaseType_t Web_Fetch_Time(UART_HandleTypeDef *huart, CommHandle_t *hcomm, DateTime_t *datetime);
-BaseType_t Res_Waiting_Setup(const char* msg);
-BaseType_t Wait_Esp_Res(uint16_t timeoutMs, char** res);
-void Wait_Res_Compare(const char* msg);
-void Handle_SysMsg(const char* msg);
+BaseType_t Lwesp_Init(void);
+BaseType_t Server_Conn(CommHandle_t *hcomm);
+BaseType_t Web_Fetch_Time(CommHandle_t *hcomm, DateTime_t *datetime);
 void Build_Weather_Message(char* msg, const char* prefix, uint8_t value);
 
 void Init_Task(void* arg);
@@ -628,23 +623,37 @@ static void MX_GPIO_Init(void)
 //----- task handler
 void Init_Task(void* arg)
 {
-	BaseType_t init_res;
 	Read_Device_Uid(device_id);
-	init_res = ESP_Init(&huart2);
 	Build_CommHandle(&hcomm, http_device_url, http_weather_url, server_ip, mqtt_port, device_id, &htim13);
 
-	Server_Conn(&huart2, &hcomm);
-	init_res = Web_Fetch_Time(&huart2, &hcomm, &query_time);
-	init_res = RTC_SetValue(&query_time);
+	for (;;) {
+		if (server_ready) {
+			vTaskDelay(pdMS_TO_TICKS(1000));
+			continue;
+		}
 
-	if (init_res == pdPASS){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitSucc.", ".");
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "Init...", ".");
+		BaseType_t init_res = Lwesp_Init();
+		if (init_res == pdPASS) {
+			init_res = Server_Conn(&hcomm);
+		}
+		if (init_res == pdPASS) {
+			init_res = Web_Fetch_Time(&hcomm, &query_time);
+		}
+		if (init_res == pdPASS) {
+			init_res = RTC_SetValue(&query_time);
+		}
+
+		if (init_res == pdPASS){
+			server_ready = true;
+			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitSucc.", ".");
+		}
+		else{
+			server_ready = false;
+			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitRetry", ".");
+			vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+		}
 	}
-	else{
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitFailed", ".");
-		configASSERT(init_res == pdPASS);
-	}
-	vTaskDelete(NULL);
 	//xTaskNotify(meas_htask, 0, 0);
 	/*
 	 * If the task implementation ever exits the above loop, then the task
@@ -660,15 +669,16 @@ void Init_Task(void* arg)
 //task for receving
 void Esp_Rec_Task(void* arg)
 {
-	BaseType_t waitNotiResut;
-	uint32_t ulNotifiedValue;
 	HAL_UARTEx_ReceiveToIdle_DMA(&huart2, recv_buffers[recv_buffer_idx], RECV_BUFFER_SIZE);
 	for (;;) {
 		xTaskNotifyWait(0, 0x00, NULL, portMAX_DELAY);
-		while (recv_read_idx != recv_buffer_idx){
-			Recv_Handler(recv_buffers[recv_read_idx]);
+	while (recv_read_idx != recv_buffer_idx){
+			uint16_t size = recv_sizes[recv_read_idx];
+			if (lwesp_initialized && size > 0) {
+				ESP32AT_Input(recv_buffers[recv_read_idx], size);
+			}
 			recv_read_idx = (recv_read_idx + 1) % RECV_BUFFER_NUM;
-		}
+	}
 		//waitNotiResut = xTaskNotifyWait(0, 0, &ulNotifiedValue, portMAX_DELAY);
 	}
 	/*
@@ -688,20 +698,27 @@ void Meas_Task(void* arg)
 	char msg2[LCD_CHAR_NUM];
 	TickType_t xDelay;
 	for (;;) {
-		ErrorStatus status = DHT11_Read(&dht);
-		if (status != ERROR) {
+		if (!server_ready) {
+			vTaskDelay(pdMS_TO_TICKS(1000));
+			continue;
+		}
+
+		ErrorStatus dht_status = DHT11_Read(&dht);
+		if (dht_status != ERROR) {
 			tempc = dht.Temperature;
 			humidity = dht.Humidty;
-			status = Build_WeatherReportQuery((char*)send_buffer, &hcomm, tempc, humidity, device_id);
-
-			status &= Res_Waiting_Setup(POST_SUCCESS) == pdPASS;
-			HAL_StatusTypeDef send_status = ESP_Http_Post(&huart2, (char*)send_buffer);
-			status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL) == pdPASS;
-			if (send_status == HAL_OK && status == SUCCESS){
-				meas_send_count++;
-				Build_Weather_Message(msg1, "Temp", tempc);
-				Build_Weather_Message(msg2, "Humi", humidity);
-				LCD_SetContent_Refresh(&hi2c1, &lcd_content, msg1, msg2);
+			ErrorStatus build_status = Build_WeatherReportQuery((char*)send_buffer, &hcomm, tempc, humidity, device_id);
+			if (build_status != ERROR) {
+				ErrorStatus post_status = Http_Post_Url((char*)send_buffer, POST_SUCCESS);
+				if (post_status == SUCCESS){
+					meas_send_count++;
+					Build_Weather_Message(msg1, "Temp", tempc);
+					Build_Weather_Message(msg2, "Humi", humidity);
+					LCD_SetContent_Refresh(&hi2c1, &lcd_content, msg1, msg2);
+				}
+				else {
+					server_ready = false;
+				}
 			}
 		}
 		else {
@@ -720,115 +737,99 @@ void Meas_Task(void* arg)
 }
 
 //----- functions
-BaseType_t ESP_Init(UART_HandleTypeDef *huart)
+BaseType_t Lwesp_Init(void)
 {
-	HAL_StatusTypeDef status = ESP_Close_Echo(huart);
-	HAL_Delay(1000);
-	return status == HAL_OK;
+	if (lwesp_initialized) {
+		return pdPASS;
+	}
+
+	ESP32AT_SetUart(&huart2);
+	lwespr_t res = lwesp_init(NULL, 1);
+	if (res == lwespOK) {
+		lwesp_initialized = true;
+		return pdPASS;
+	}
+	return pdFAIL;
 }
 
-BaseType_t Server_Conn(UART_HandleTypeDef *huart, CommHandle_t *hcomm)
+BaseType_t Server_Conn(CommHandle_t *hcomm)
 {
-	BaseType_t status = pdPASS;
+	if (hcomm == NULL) {
+		return pdFAIL;
+	}
 
-	status = Res_Waiting_Setup(POST_SUCCESS);
-	status &= Post_Login(huart, hcomm) == SUCCESS;
-	status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
-
-	if (status == pdFAIL){
+	if (Post_Login(hcomm) != SUCCESS){
 		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "postlogin fail", ".");
 		printf("post login failed\n");
-		return status;
+		return pdFAIL;
 	}
 
-	HAL_StatusTypeDef halstatus = HAL_OK;
-
-	status = Res_Waiting_Setup(ESP_RESP_OK);
-	halstatus = ESP_MQTT_CLEAN(&huart2);
-	status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
-	HAL_Delay(10 * 1000);
-	if (halstatus != HAL_OK || status == pdFAIL){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTCleanFail", ".");
-		printf("mqtt clean failed\n");
-		//return status;
+	if (mqtt_client == NULL) {
+		mqtt_client = lwesp_mqtt_client_api_new(512, 512);
+		if (mqtt_client == NULL) {
+			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTAllocFail", ".");
+			return pdFAIL;
+		}
+	} else {
+		lwesp_mqtt_client_api_close(mqtt_client);
 	}
 
-	status = Res_Waiting_Setup(ESP_RESP_OK);
-	halstatus = ESP_MQTT_Cfg(&huart2, 1, "123", "123", "123");
-	status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
+	lwesp_mqtt_client_info_t info;
+	memset(&info, 0, sizeof(info));
+	info.id = "123";
+	info.user = "123";
+	info.pass = "123";
+	info.keep_alive = 60;
+	info.use_ssl = 0;
 
-	if (halstatus != HAL_OK || status == pdFAIL){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTCfgFail", ".");
-		printf("mqtt cfg failed\n");
-		return status;
+	lwesp_port_t port = (lwesp_port_t)atoi(hcomm ->MQTTPort);
+	if (port == 0) {
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTPortFail", ".");
+		return pdFAIL;
 	}
-
-	status = Res_Waiting_Setup(ESP_RESP_OK);
-	halstatus = ESP_MQTT_CONN(&huart2, hcomm ->ServerIp, hcomm ->MQTTPort);
-	status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
-
-	if (halstatus != HAL_OK || status == pdFAIL){
+	lwesp_mqtt_conn_status_t conn_status = lwesp_mqtt_client_api_connect(
+			mqtt_client, hcomm ->ServerIp, port, &info);
+	if (conn_status != LWESP_MQTT_CONN_STATUS_ACCEPTED) {
 		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTConnFail", ".");
 		printf("mqtt conn failed\n");
-		return status;
+		return pdFAIL;
 	}
 
 	size_t len = 0;
 	memcpy(send_buffer, hcomm ->DeviceId, DEVICE_UID_LEN);
 	len += DEVICE_UID_LEN;
-	memcpy(send_buffer + DEVICE_UID_LEN, SUFFIX_REQ, strlen(SUFFIX_REQ));
+	memcpy(send_buffer + len, SUFFIX_REQ, strlen(SUFFIX_REQ));
 	len += strlen(SUFFIX_REQ);
 	send_buffer[len++] = '\0';
 
-	status = Res_Waiting_Setup(ESP_RESP_OK);
-	halstatus = ESP_MQTT_Sub(&huart2, (char*) send_buffer);
-	status = Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
-
-	if (halstatus != HAL_OK || status == pdFAIL){
+	if (lwesp_mqtt_client_api_subscribe(mqtt_client, (char*)send_buffer, LWESP_MQTT_QOS_AT_LEAST_ONCE) != lwespOK) {
 		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTSubFail", ".");
 		printf("mqtt sub failed\n");
 		return pdFAIL;
 	}
 
-	memcpy(send_buffer + DEVICE_UID_LEN, SUFFIX_RES, strlen(SUFFIX_REQ));
-	status = Res_Waiting_Setup(ESP_RESP_OK);
-	halstatus = ESP_MQTT_Sub(&huart2, (char*) send_buffer);
-	status = Wait_Esp_Res(WAIT_RES_TIMEOUTMS, NULL);
+	len = DEVICE_UID_LEN;
+	memcpy(send_buffer + len, SUFFIX_RES, strlen(SUFFIX_RES));
+	len += strlen(SUFFIX_RES);
+	send_buffer[len++] = '\0';
 
-	if (halstatus != HAL_OK || status == pdFAIL){
+	if (lwesp_mqtt_client_api_subscribe(mqtt_client, (char*)send_buffer, LWESP_MQTT_QOS_AT_LEAST_ONCE) != lwespOK) {
 		printf("mqtt sub failed\n");
 		return pdFAIL;
 	}
 
-	return status;
+	return pdPASS;
 }
 
-BaseType_t Web_Fetch_Time(UART_HandleTypeDef *huart, CommHandle_t *hcomm, DateTime_t *datetime)
+BaseType_t Web_Fetch_Time(CommHandle_t *hcomm, DateTime_t *datetime)
 {
-	ErrorStatus status = pdPASS;
-	status = Res_Waiting_Setup(ESP_HTTPGET_RES_PREFIX);
-	status &= Get_CurrentTime(huart, hcomm, datetime);
-	char* res = NULL;
-	status &= Wait_Esp_Res(WAIT_RES_TIMEOUTMS, &res);
-
-	if (status == ERROR || res == NULL){
+	ErrorStatus status = Get_CurrentTime(hcomm, datetime);
+	if (status == ERROR){
 		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "TimeFetchFail", ".");
 		printf("time fetch failed\n");
 		return pdFAIL;
 	}
 
-	char* dt_res = strchr(res, KeyValueSeperater);
-	if (dt_res == NULL){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "TimeFetchFail", ".");
-		printf("timeFormatErr\n");
-		return pdFAIL;
-	}
-	ErrorStatus errstat = Try_Parse_Time(dt_res + 1, datetime);
-	if (errstat == ERROR){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "TimeFetchFail", ".");
-		printf("timeFormatErr\n");
-		return pdFAIL;
-	}
 	BaseType_t retval = RTC_SetValue(datetime);
 	if (retval){
 		printf("timeFormatSucc\n");
@@ -867,82 +868,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
 	uint16_t size = min(Size, RECV_BUFFER_SIZE - 1);
 	recv_buffers[recv_buffer_idx][size] = '\0';
+	recv_sizes[recv_buffer_idx] = size;
 	recv_buffer_idx = (recv_buffer_idx + 1) % RECV_BUFFER_NUM;
 	HAL_UARTEx_ReceiveToIdle_DMA(&huart2, recv_buffers[recv_buffer_idx], RECV_BUFFER_SIZE);
 	BaseType_t higherPriority = pdFALSE;
 	xTaskNotifyFromISR(recv_htask, 0, eNoAction, &higherPriority);
 	portYIELD_FROM_ISR(higherPriority);
-}
-
-void Recv_Handler(const char* msg)
-{
-	if (recv_callback != NULL){
-		recv_callback(msg);
-	}
-	Handle_SysMsg(msg);
-}
-
-BaseType_t Res_Waiting_Setup(const char* msg)
-{
-	BaseType_t retval = pdFAIL;
-	if (msg == NULL){
-		return retval;
-	}
-
-	size_t size = strlen(msg);
-	memcpy(res_waiting, msg, size);
-	res_waiting[size] = '\0';
-	recv_callback = &Wait_Res_Compare;
-	res_receivced = false;
-	target_res = NULL;
-
-	return pdPASS;
-}
-
-BaseType_t Wait_Esp_Res(uint16_t timeoutMs, char** res)
-{
-	BaseType_t retval = pdFAIL;
-	htim13.Instance->CNT = 0;
-	HAL_TIM_Base_Start(&htim13);
-	while (htim13.Instance->CNT < timeoutMs){
-		if (res_receivced){
-			if (res != NULL){
-				*res = target_res;
-			}
-			retval = pdPASS;
-			break;
-		}
-	}
-
-	HAL_TIM_Base_Stop(&htim13);
-
-	if (retval == pdPASS){
-		printf("waiting succ. %s\n", res_waiting);
-	}
-	else{
-		printf("waiting failed. %s\n", res_waiting);
-	}
-	recv_callback = NULL;
-	res_waiting[0] = '\0';
-	return retval;
-}
-
-void Wait_Res_Compare(const char* msg)
-{
-	char* match_pt = strstr(msg, res_waiting);
-	if (match_pt != NULL){
-		target_res = msg;
-		res_receivced = true;
-	}
-	else{
-		res_receivced = false;
-		target_res = NULL;
-	}
-}
-
-void Handle_SysMsg(const char* msg)
-{
-
 }
 
 void Build_Weather_Message(char* msg, const char* prefix, uint8_t value)

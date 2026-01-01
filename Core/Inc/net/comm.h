@@ -10,7 +10,7 @@
 
 #include <stdbool.h>
 
-#include "esp32at.h"
+#include "stm32f4xx.h"
 #include "utils.h"
 
 #define LOGIN_PREFIX ("login")
@@ -50,13 +50,13 @@ ErrorStatus Build_CommHandle(CommHandle_t* h, char* httpDeviceUrl, char* httpWea
 
 ErrorStatus Try_Parse_Time(char* str, DateTime_t* data);
 
-ErrorStatus Post_Login(UART_HandleTypeDef* uart, CommHandle_t* hcomm);
+ErrorStatus Post_Login(CommHandle_t* hcomm);
 
-ErrorStatus Post_Logout(UART_HandleTypeDef* uart, CommHandle_t* hcomm);
+ErrorStatus Post_Logout(CommHandle_t* hcomm);
 
-ErrorStatus Get_CurrentTime(UART_HandleTypeDef* uart, CommHandle_t* hcomm, DateTime_t* dt);
+ErrorStatus Get_CurrentTime(CommHandle_t* hcomm, DateTime_t* dt);
 
-ErrorStatus MQTT_Login(UART_HandleTypeDef* uart, CommHandle_t* hcomm);
+ErrorStatus Http_Post_Url(const char* url, const char* expect);
 
 ErrorStatus Build_WeatherReportQuery(char* str, CommHandle_t* hcomm, uint8_t tempC, uint8_t humidty, char* deviceID);
 #endif /* INC_NET_COMM_H_ */

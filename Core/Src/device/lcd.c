@@ -10,8 +10,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
-#include "string.h"
+#include <stdio.h>
+#include <string.h>
 #include "stm32f4xx.h"
 #include "utils.h"
 #include "lcd.h"
@@ -60,26 +60,25 @@ void LCD_Clear(I2C_HandleTypeDef *i2chandle) {
 }
 
 void LCD_Init(I2C_HandleTypeDef *i2chandle) {
-	HAL_StatusTypeDef status = HAL_OK;
 	HAL_Delay(100);
-	status = lcd_send_cmd(i2chandle, 0x30);
+	lcd_send_cmd(i2chandle, 0x30);
 	HAL_Delay(10);
-	status = lcd_send_cmd(i2chandle, 0x30);
+	lcd_send_cmd(i2chandle, 0x30);
 	HAL_Delay(10);
-	status = lcd_send_cmd(i2chandle, 0x30);
+	lcd_send_cmd(i2chandle, 0x30);
 	HAL_Delay(10);
-	status = lcd_send_cmd(i2chandle, 0x20);
+	lcd_send_cmd(i2chandle, 0x20);
 	HAL_Delay(20);
 
-	status = lcd_send_cmd(i2chandle, 0x28);        //function set
+	lcd_send_cmd(i2chandle, 0x28);        //function set
 	HAL_Delay(20);
-	status = lcd_send_cmd(i2chandle, 0x08);        //Display on/off
+	lcd_send_cmd(i2chandle, 0x08);        //Display on/off
 	HAL_Delay(20);
-	status = lcd_send_cmd(i2chandle, 0x01);        //clear display
+	lcd_send_cmd(i2chandle, 0x01);        //clear display
 	HAL_Delay(20);
-	status = lcd_send_cmd(i2chandle, 0x06);        //Enter mode
+	lcd_send_cmd(i2chandle, 0x06);        //Enter mode
 	HAL_Delay(20);
-	status = lcd_send_cmd(i2chandle, 0x0C);        //Display on/off
+	lcd_send_cmd(i2chandle, 0x0C);        //Display on/off
 	HAL_Delay(20);
 }
 
@@ -124,12 +123,18 @@ ErrorStatus LCD_SetContent_Refresh(I2C_HandleTypeDef *i2chandle, LCDContent_t* c
 	}
 
 	if(line1 != NULL){
-		int len1 = fmin(LCD_CHAR_NUM, strlen(line1));
+		size_t len1 = strlen(line1);
+		if (len1 > (size_t)LCD_CHAR_NUM){
+			len1 = LCD_CHAR_NUM;
+		}
 		memcpy(content -> FirstLine, line1, len1);
 		content -> FirstLine[len1] = '\0';
 	}
 	if(line2 != NULL){
-		int len2 = fmin(LCD_CHAR_NUM, strlen(line2));
+		size_t len2 = strlen(line2);
+		if (len2 > (size_t)LCD_CHAR_NUM){
+			len2 = LCD_CHAR_NUM;
+		}
 		memcpy(content -> SecLine, line2, len2);
 		content -> SecLine[len2] = '\0';
 	}

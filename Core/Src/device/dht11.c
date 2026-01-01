@@ -34,7 +34,8 @@ void _set_dht11_gpio_mode(DHT11Handle *dht, uint8_t pMode,
 
 ErrorStatus DHT11_Read(DHT11Handle *dht) {
 	uint16_t mTime1 = 0, mTime2 = 0, mBit = 0;
-	uint8_t humVal = 0, tempVal = 0, parityVal = 0, genParity = 0;
+	uint8_t humVal = 0, humDec = 0, tempVal = 0, tempDec = 0, parityVal = 0,
+			genParity = 0;
 	uint8_t mData[40];
 
 	//start comm
@@ -150,10 +151,22 @@ ErrorStatus DHT11_Read(DHT11Handle *dht) {
 		humVal = humVal << 1;
 	}
 
+	//get hum decimal value from data buffer
+	for (int i = 8; i < 16; i++) {
+		humDec += mData[i];
+		humDec = humDec << 1;
+	}
+
 	//get temp value from data buffer
 	for (int i = 16; i < 24; i++) {
 		tempVal += mData[i];
 		tempVal = tempVal << 1;
+	}
+
+	//get temp decimal value from data buffer
+	for (int i = 24; i < 32; i++) {
+		tempDec += mData[i];
+		tempDec = tempDec << 1;
 	}
 
 	//get parity value from data buffer
@@ -164,9 +177,14 @@ ErrorStatus DHT11_Read(DHT11Handle *dht) {
 
 	parityVal = parityVal >> 1;
 	humVal = humVal >> 1;
+	humDec = humDec >> 1;
 	tempVal = tempVal >> 1;
+	tempDec = tempDec >> 1;
 
-	genParity = humVal + tempVal;
+	genParity = humVal + humDec + tempVal + tempDec;
+	if (genParity != parityVal) {
+		return ERROR;
+	}
 
 	dht->Temperature = tempVal;
 	dht->Humidty = humVal;

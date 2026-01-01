@@ -8,14 +8,13 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "stm32f4xx.h"
-#include "esp32at.h"
 #include "comm.h"
 #include "utils.h"
-
-const char MQTT_CONN[] = "+MQTTCONNECTED";
-const char MQTT_DISCONN[] = "+MQTTDISCONNECTED";
+#include "lwesp/lwesp_netconn.h"
+#include "lwesp/lwesp_pbuf.h"
 
 const char DATETIME_SP[] = "T";
 const char DATE_SP[] = "-";
@@ -33,6 +32,22 @@ const char TEMPC[] = "TemperatureC";
 const char HUMIDITY[] = "HUMIDITY";
 
 const char POST_SUCCESS[] = "succ";
+
+#define HTTP_REQ_BUFFER_SIZE 384
+#define HTTP_RESP_BUFFER_SIZE 512
+#define HTTP_DEFAULT_PORT 80
+#define HTTP_TIMEOUT_MS 5000
+
+typedef struct {
+	char host[64];
+	char path[192];
+	uint16_t port;
+} HttpUrlParts;
+
+static ErrorStatus Http_Parse_Url(const char* url, HttpUrlParts* parts);
+static const char* Http_Find_Body(char* response);
+static ErrorStatus Http_Request(const char* method, const char* url, const char* body, size_t body_len,
+		char* response, size_t response_len, const char** out_body);
 
 ErrorStatus Build_CommHandle(CommHandle_t* h, char* httpDeviceUrl, char* httpWeatherUrl, char* serverIp,
 		char* mqttPort, char deviceID[DEVICE_UID_LEN], TIM_HandleTypeDef* htimMs)
@@ -124,7 +139,155 @@ ErrorStatus Try_Parse_Time(char* str, DateTime_t* data)
 	return SUCCESS;
 }
 
-ErrorStatus Post_Login(UART_HandleTypeDef* uart, CommHandle_t* hcomm)
+static ErrorStatus Http_Parse_Url(const char* url, HttpUrlParts* parts)
+{
+	if (url == NULL || parts == NULL) {
+		return ERROR;
+	}
+
+	const char* scheme = "http://";
+	size_t scheme_len = strlen(scheme);
+	if (strncmp(url, scheme, scheme_len) != 0) {
+		return ERROR;
+	}
+
+	const char* host_start = url + scheme_len;
+	const char* path_start = strchr(host_start, '/');
+	const char* host_end = path_start != NULL ? path_start : (url + strlen(url));
+	const char* port_sep = memchr(host_start, ':', (size_t)(host_end - host_start));
+
+	size_t host_len = port_sep != NULL ? (size_t)(port_sep - host_start) : (size_t)(host_end - host_start);
+	if (host_len == 0 || host_len >= sizeof(parts->host)) {
+		return ERROR;
+	}
+	memcpy(parts->host, host_start, host_len);
+	parts->host[host_len] = '\0';
+
+	if (port_sep != NULL) {
+		parts->port = (uint16_t)atoi(port_sep + 1);
+		if (parts->port == 0) {
+			return ERROR;
+		}
+	}
+	else {
+		parts->port = HTTP_DEFAULT_PORT;
+	}
+
+	if (path_start != NULL) {
+		size_t path_len = strlen(path_start);
+		if (path_len >= sizeof(parts->path)) {
+			return ERROR;
+		}
+		memcpy(parts->path, path_start, path_len + 1);
+	}
+	else {
+		memcpy(parts->path, "/", 2);
+	}
+
+	return SUCCESS;
+}
+
+static const char* Http_Find_Body(char* response)
+{
+	if (response == NULL) {
+		return NULL;
+	}
+	char* body = strstr(response, "\r\n\r\n");
+	if (body == NULL) {
+		return response;
+	}
+	return body + 4;
+}
+
+static ErrorStatus Http_Request(const char* method, const char* url, const char* body, size_t body_len,
+		char* response, size_t response_len, const char** out_body)
+{
+	if (method == NULL || url == NULL || response == NULL || response_len == 0) {
+		return ERROR;
+	}
+
+	HttpUrlParts parts;
+	if (Http_Parse_Url(url, &parts) != SUCCESS) {
+		return ERROR;
+	}
+
+	lwesp_netconn_p conn = lwesp_netconn_new(LWESP_NETCONN_TYPE_TCP);
+	if (conn == NULL) {
+		return ERROR;
+	}
+
+	lwesp_netconn_set_receive_timeout(conn, HTTP_TIMEOUT_MS);
+	if (lwesp_netconn_connect(conn, parts.host, parts.port) != lwespOK) {
+		lwesp_netconn_delete(conn);
+		return ERROR;
+	}
+
+	char request[HTTP_REQ_BUFFER_SIZE];
+	int req_len = snprintf(request, sizeof(request),
+			"%s %s HTTP/1.1\r\n"
+			"Host: %s\r\n"
+			"Connection: close\r\n"
+			"Content-Length: %lu\r\n"
+			"\r\n",
+			method, parts.path, parts.host, (unsigned long)body_len);
+	if (req_len <= 0 || (size_t)req_len >= sizeof(request)) {
+		lwesp_netconn_close(conn);
+		lwesp_netconn_delete(conn);
+		return ERROR;
+	}
+
+	if (lwesp_netconn_write_ex(conn, request, (size_t)req_len, LWESP_NETCONN_FLAG_FLUSH) != lwespOK) {
+		lwesp_netconn_close(conn);
+		lwesp_netconn_delete(conn);
+		return ERROR;
+	}
+
+	if (body != NULL && body_len > 0) {
+		if (lwesp_netconn_write_ex(conn, body, body_len, LWESP_NETCONN_FLAG_FLUSH) != lwespOK) {
+			lwesp_netconn_close(conn);
+			lwesp_netconn_delete(conn);
+			return ERROR;
+		}
+	}
+
+	size_t offset = 0;
+	while (offset + 1 < response_len) {
+		lwesp_pbuf_p pbuf = NULL;
+		lwespr_t res = lwesp_netconn_receive(conn, &pbuf);
+		if (res != lwespOK) {
+			if (pbuf != NULL) {
+				lwesp_pbuf_free(pbuf);
+			}
+			break;
+		}
+
+		size_t len = lwesp_pbuf_length(pbuf, 1);
+		size_t copy_len = len;
+		if (copy_len > (response_len - 1 - offset)) {
+			copy_len = response_len - 1 - offset;
+		}
+		if (copy_len > 0) {
+			lwesp_pbuf_copy(pbuf, response + offset, copy_len, 0);
+			offset += copy_len;
+		}
+		lwesp_pbuf_free(pbuf);
+	}
+	response[offset] = '\0';
+
+	lwesp_netconn_close(conn);
+	lwesp_netconn_delete(conn);
+
+	if (offset == 0) {
+		return ERROR;
+	}
+
+	if (out_body != NULL) {
+		*out_body = Http_Find_Body(response);
+	}
+	return SUCCESS;
+}
+
+ErrorStatus Post_Login(CommHandle_t* hcomm)
 {
 	//http://192.168.47.157:5276/api/device/login?deviceUID=123
 	char url[256];
@@ -141,16 +304,10 @@ ErrorStatus Post_Login(UART_HandleTypeDef* uart, CommHandle_t* hcomm)
 	len += DEVICE_UID_LEN;
 	url[len++] = '\0';
 
-	HAL_StatusTypeDef status = ESP_Http_Post(uart, url);
-	if (status == HAL_OK){
-		return SUCCESS;
-	}
-	else{
-		return ERROR;
-	}
+	return Http_Post_Url(url, POST_SUCCESS);
 }
 
-ErrorStatus Post_Logout(UART_HandleTypeDef* uart, CommHandle_t* hcomm)
+ErrorStatus Post_Logout(CommHandle_t* hcomm)
 {
 	//http://192.168.47.157:5276/api/device/logout?deviceUID=123
 	char url[256];
@@ -167,16 +324,10 @@ ErrorStatus Post_Logout(UART_HandleTypeDef* uart, CommHandle_t* hcomm)
 	len += DEVICE_UID_LEN;
 	url[len++] = '\0';
 
-	HAL_StatusTypeDef status = ESP_Http_Post(uart, url);
-	if (status == HAL_OK){
-		return SUCCESS;
-	}
-	else{
-		return ERROR;
-	}
+	return Http_Post_Url(url, POST_SUCCESS);
 }
 
-ErrorStatus Get_CurrentTime(UART_HandleTypeDef* uart, CommHandle_t* hcomm, DateTime_t* dt)
+ErrorStatus Get_CurrentTime(CommHandle_t* hcomm, DateTime_t* dt)
 {
 	if (dt == NULL){
 		return ERROR;
@@ -196,23 +347,35 @@ ErrorStatus Get_CurrentTime(UART_HandleTypeDef* uart, CommHandle_t* hcomm, DateT
 	len += DEVICE_UID_LEN;
 	url[len++] = '\0';
 
-	HAL_StatusTypeDef status = ESP_Http_Get(uart, url);
-	if (status == HAL_OK){
-		return SUCCESS;
-	}
-	else{
+	char response[HTTP_RESP_BUFFER_SIZE];
+	const char* body = NULL;
+	if (Http_Request("GET", url, NULL, 0, response, sizeof(response), &body) != SUCCESS) {
 		return ERROR;
 	}
+
+	if (body == NULL) {
+		return ERROR;
+	}
+
+	char* dt_res = strchr((char*)body, KeyValueSeperater);
+	if (dt_res == NULL) {
+		return ERROR;
+	}
+	return Try_Parse_Time(dt_res + 1, dt);
 }
 
-ErrorStatus MQTT_Login(UART_HandleTypeDef* uart, CommHandle_t* hcomm)
+ErrorStatus Http_Post_Url(const char* url, const char* expect)
 {
-	return SUCCESS;
-}
+	char response[HTTP_RESP_BUFFER_SIZE];
+	const char* body = NULL;
+	if (Http_Request("POST", url, NULL, 0, response, sizeof(response), &body) != SUCCESS) {
+		return ERROR;
+	}
 
-ErrorStatus Wait_Response(UART_HandleTypeDef* uart, CommHandle_t* hcomm, char* pattern)
-{
-	return SUCCESS;
+	if (expect != NULL && body != NULL && strstr(body, expect) != NULL) {
+		return SUCCESS;
+	}
+	return ERROR;
 }
 
 ErrorStatus Build_WeatherReportQuery(char* str, CommHandle_t* hcomm, uint8_t tempC, uint8_t humidity, char* deviceUID)
