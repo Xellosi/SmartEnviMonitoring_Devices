@@ -46,8 +46,6 @@
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS}&quot;"/>
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS/include}&quot;"/>
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS/portable/GCC/ARM_CM4F}&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/lwesp/lwesp/src/include}&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/lwesp/lwesp/src/include/system/port/freertos}&quot;"/>
 									<listOptionValue builtIn="false" value="../Drivers/STM32F4xx_HAL_Driver/Inc"/>
 									<listOptionValue builtIn="false" value="../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy"/>
 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Device/ST/STM32F4xx/Include"/>
@@ -84,10 +82,6 @@
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/FreeRTOS"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/lwesp"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/api"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/apps/mqtt"/>
-						<entry excluding="lwesp_ll_posix.c|lwesp_ll_stm32.c|lwesp_ll_stm32_threadx.c|lwesp_ll_stm32f429zi_nucleo.c|lwesp_ll_stm32f723e_discovery.c|lwesp_ll_stm32f769i_discovery.c|lwesp_ll_stm32h735g_dk_threadx.c|lwesp_ll_stm32l432kc_nucleo.c|lwesp_ll_stm32l496g_discovery.c|lwesp_ll_stm32l4s5_discovery.c|lwesp_ll_win32.c|lwesp_mem_lwmem.c|lwesp_mem_posix.c|lwesp_mem_threadx.c|lwesp_sys_cmsis_os.c|lwesp_sys_posix.c|lwesp_sys_threadx.c|lwesp_sys_win32.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/system"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>
@@ -137,8 +131,6 @@
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS}&quot;"/>
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS/include}&quot;"/>
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/FreeRTOS/portable/GCC/ARM_CM4F}&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/lwesp/lwesp/src/include}&quot;"/>
-									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/ThirdParty/lwesp/lwesp/src/include/system/port/freertos}&quot;"/>
 									<listOptionValue builtIn="false" value="../Drivers/STM32F4xx_HAL_Driver/Inc"/>
 									<listOptionValue builtIn="false" value="../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy"/>
 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Device/ST/STM32F4xx/Include"/>
@@ -172,10 +164,6 @@
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/FreeRTOS"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/lwesp"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/api"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/apps/mqtt"/>
-						<entry excluding="lwesp_ll_posix.c|lwesp_ll_stm32.c|lwesp_ll_stm32_threadx.c|lwesp_ll_stm32f429zi_nucleo.c|lwesp_ll_stm32f723e_discovery.c|lwesp_ll_stm32f769i_discovery.c|lwesp_ll_stm32h735g_dk_threadx.c|lwesp_ll_stm32l432kc_nucleo.c|lwesp_ll_stm32l496g_discovery.c|lwesp_ll_stm32l4s5_discovery.c|lwesp_ll_win32.c|lwesp_mem_lwmem.c|lwesp_mem_posix.c|lwesp_mem_threadx.c|lwesp_sys_cmsis_os.c|lwesp_sys_posix.c|lwesp_sys_threadx.c|lwesp_sys_win32.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/lwesp/lwesp/src/system"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>

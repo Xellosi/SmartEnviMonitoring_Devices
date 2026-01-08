@@ -13,8 +13,11 @@ A weather reporting system that periodically reads temperature and humidity data
   > UART2
   
 # Setup
-Change the following variables in main.c to the url and ip address of the server you set up.
-- http_device_url
-- http_weather_url
+Change the following variables in main.c to match the server you set up.
 - server_ip
 - mqtt_port
+
+HTTP URLs are composed from `server_ip` using these macros in `Core/Src/main.c`:
+- `HTTP_PORT_STR`
+- `HTTP_DEVICE_PATH`
+- `HTTP_WEATHER_PATH`

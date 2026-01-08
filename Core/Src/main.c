@@ -38,9 +38,14 @@
 #include "lcd.h"
 #include "utils.h"
 #include "esp32at.h"
+#include "config_storage.h"
+#include "ble_config.h"
 #include "comm.h"
-#include "lwesp/lwesp.h"
-#include "lwesp/apps/lwesp_mqtt_client_api.h"
+#if defined(__has_include)
+#if __has_include("local_config.h")
+#include "local_config.h"
+#endif
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,13 +60,38 @@
 #define RECV_BUFFER_NUM 5
 #define RECV_BUFFER_SIZE 300
 #define SEND_BUFFER_SIZE 256
-#define WAIT_RES_TIMEOUTMS ((uint16_t)5000)
+#define WAIT_RES_TIMEOUTMS ((uint16_t)15000)
 #define RECONNECT_DELAY_MS ((uint16_t)5000)
+#define URL_BUFFER_SIZE 128
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS ""
+#endif
+#ifndef DEFAULT_SERVER_IP
+#define DEFAULT_SERVER_IP "192.168.50.135"
+#endif
+#ifndef DEFAULT_MQTT_PORT
+#define DEFAULT_MQTT_PORT "1883"
+#endif
+#ifndef HTTP_PORT_STR
+#define HTTP_PORT_STR "8080"
+#endif
+#ifndef HTTP_DEVICE_PATH
+#define HTTP_DEVICE_PATH "/api/device"
+#endif
+#ifndef HTTP_WEATHER_PATH
+#define HTTP_WEATHER_PATH "/api/weather"
+#endif
+#ifndef MQTT_ENABLED
+#define MQTT_ENABLED 0
+#endif
 
-char http_device_url[] = "http://172.17.238.18:80/api/device";
-char http_weather_url[] = "http://172.17.238.18:80/api/weather";
-char server_ip[] = "172.17.238.17";
-char mqtt_port[] = "1883";
+char http_device_url[URL_BUFFER_SIZE] = "http://" DEFAULT_SERVER_IP ":" HTTP_PORT_STR HTTP_DEVICE_PATH;
+char http_weather_url[URL_BUFFER_SIZE] = "http://" DEFAULT_SERVER_IP ":" HTTP_PORT_STR HTTP_WEATHER_PATH;
+char server_ip[CONFIG_STORAGE_MAX_IP_LEN] = DEFAULT_SERVER_IP;
+char mqtt_port[] = DEFAULT_MQTT_PORT;
 
 /* USER CODE END PD */
 
@@ -90,12 +120,15 @@ char device_id[DEVICE_UID_LEN];
 DateTime_t query_time;
 TimerHandle_t mstim;
 volatile bool server_ready = false;
-static volatile bool lwesp_initialized = false;
-static lwesp_mqtt_client_api_p mqtt_client = NULL;
+static char pending_server_ip[CONFIG_STORAGE_MAX_IP_LEN];
+static volatile bool pending_ip_update = false;
+static bool pending_ip_persist = false;
+static bool pending_ip_reconnect = false;
 
 /* lcd */
 SemaphoreHandle_t lcd_mutex;
 LCDContent_t lcd_content;
+SemaphoreHandle_t config_mutex;
 
 /* measurement */
 DHT11Handle dht;
@@ -109,6 +142,7 @@ uint8_t send_buffer[SEND_BUFFER_SIZE];
 uint16_t send_data_len = 0;
 uint8_t recv_buffers[RECV_BUFFER_NUM][RECV_BUFFER_SIZE];
 uint16_t recv_sizes[RECV_BUFFER_NUM] = {0};
+static volatile bool uart2_rx_restart = false;
 
 volatile int recv_buffer_idx = 0;
 volatile int recv_read_idx = 0;
@@ -137,10 +171,14 @@ static void MX_TIM13_Init(void);
 static void MX_I2S3_Init(void);
 /* USER CODE BEGIN PFP */
 BaseType_t RTC_SetValue(DateTime_t *datetime);
-BaseType_t Lwesp_Init(void);
+BaseType_t ESP32AT_InitWrapper(void);
 BaseType_t Server_Conn(CommHandle_t *hcomm);
 BaseType_t Web_Fetch_Time(CommHandle_t *hcomm, DateTime_t *datetime);
 void Build_Weather_Message(char* msg, const char* prefix, uint8_t value);
+static void Ble_Apply_Ip(const char* ip, bool persist, bool reconnect);
+static bool Apply_Server_Ip_Internal(const char* ip, bool persist, bool reconnect);
+static bool Build_Http_Urls(const char* ip);
+static bool Try_Server_Connect(bool sync_time);
 
 void Init_Task(void* arg);
 //runtime
@@ -188,10 +226,15 @@ int main(void)
   MX_TIM13_Init();
   MX_I2S3_Init();
   /* USER CODE BEGIN 2 */
+	ESP32AT_SetUart(&huart2);
+
 	LCD_Init(&hi2c1);
 	LCD_SetContent_Refresh(&hi2c1, &lcd_content, "Init...", ".");
 
 	BaseType_t status = pdPASS;
+	config_mutex = xSemaphoreCreateMutex();
+	configASSERT(config_mutex != NULL);
+	Ble_Config_SetApplyFn(Ble_Apply_Ip);
 	//create the initializing task
 	status &= xTaskCreate(Init_Task, INIT_TASK_NAME,
 			(configSTACK_DEPTH_TYPE)4096, NULL, 2, &init_htask);
@@ -624,36 +667,18 @@ static void MX_GPIO_Init(void)
 void Init_Task(void* arg)
 {
 	Read_Device_Uid(device_id);
-	Build_CommHandle(&hcomm, http_device_url, http_weather_url, server_ip, mqtt_port, device_id, &htim13);
-
-	for (;;) {
-		if (server_ready) {
-			vTaskDelay(pdMS_TO_TICKS(1000));
-			continue;
-		}
-
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "Init...", ".");
-		BaseType_t init_res = Lwesp_Init();
-		if (init_res == pdPASS) {
-			init_res = Server_Conn(&hcomm);
-		}
-		if (init_res == pdPASS) {
-			init_res = Web_Fetch_Time(&hcomm, &query_time);
-		}
-		if (init_res == pdPASS) {
-			init_res = RTC_SetValue(&query_time);
-		}
-
-		if (init_res == pdPASS){
-			server_ready = true;
-			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitSucc.", ".");
-		}
-		else{
-			server_ready = false;
-			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "InitRetry", ".");
-			vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
-		}
+	bool applied = false;
+	char stored_ip[CONFIG_STORAGE_MAX_IP_LEN];
+	if (ConfigStorage_LoadIp(stored_ip, sizeof(stored_ip))) {
+		applied = Apply_Server_Ip_Internal(stored_ip, false, false);
 	}
+	if (!applied) {
+		Build_Http_Urls(server_ip);
+		Build_CommHandle(&hcomm, http_device_url, http_weather_url, server_ip, mqtt_port, device_id, &htim13);
+	}
+	Try_Server_Connect(true);
+
+	vTaskDelete(NULL);
 	//xTaskNotify(meas_htask, 0, 0);
 	/*
 	 * If the task implementation ever exits the above loop, then the task
@@ -672,13 +697,18 @@ void Esp_Rec_Task(void* arg)
 	HAL_UARTEx_ReceiveToIdle_DMA(&huart2, recv_buffers[recv_buffer_idx], RECV_BUFFER_SIZE);
 	for (;;) {
 		xTaskNotifyWait(0, 0x00, NULL, portMAX_DELAY);
-	while (recv_read_idx != recv_buffer_idx){
+		if (uart2_rx_restart) {
+			uart2_rx_restart = false;
+			HAL_UARTEx_ReceiveToIdle_DMA(&huart2, recv_buffers[recv_buffer_idx], RECV_BUFFER_SIZE);
+		}
+		while (recv_read_idx != recv_buffer_idx){
 			uint16_t size = recv_sizes[recv_read_idx];
-			if (lwesp_initialized && size > 0) {
+			if (size > 0) {
+				Ble_Config_HandleRx(recv_buffers[recv_read_idx], size);
 				ESP32AT_Input(recv_buffers[recv_read_idx], size);
 			}
 			recv_read_idx = (recv_read_idx + 1) % RECV_BUFFER_NUM;
-	}
+		}
 		//waitNotiResut = xTaskNotifyWait(0, 0, &ulNotifiedValue, portMAX_DELAY);
 	}
 	/*
@@ -698,8 +728,25 @@ void Meas_Task(void* arg)
 	char msg2[LCD_CHAR_NUM];
 	TickType_t xDelay;
 	for (;;) {
-		if (!server_ready) {
-			vTaskDelay(pdMS_TO_TICKS(1000));
+		if (pending_ip_update) {
+			char ip[CONFIG_STORAGE_MAX_IP_LEN];
+			bool persist = false;
+			bool reconnect = false;
+			if (config_mutex != NULL) {
+				xSemaphoreTake(config_mutex, portMAX_DELAY);
+			}
+			memcpy(ip, pending_server_ip, sizeof(ip));
+			persist = pending_ip_persist;
+			reconnect = pending_ip_reconnect;
+			pending_ip_update = false;
+			if (config_mutex != NULL) {
+				xSemaphoreGive(config_mutex);
+			}
+			Apply_Server_Ip_Internal(ip, persist, reconnect);
+		}
+
+		if (Ble_Config_ShouldWaitIp()) {
+			vTaskDelay(pdMS_TO_TICKS(500));
 			continue;
 		}
 
@@ -707,17 +754,22 @@ void Meas_Task(void* arg)
 		if (dht_status != ERROR) {
 			tempc = dht.Temperature;
 			humidity = dht.Humidty;
-			ErrorStatus build_status = Build_WeatherReportQuery((char*)send_buffer, &hcomm, tempc, humidity, device_id);
-			if (build_status != ERROR) {
-				ErrorStatus post_status = Http_Post_Url((char*)send_buffer, POST_SUCCESS);
-				if (post_status == SUCCESS){
-					meas_send_count++;
-					Build_Weather_Message(msg1, "Temp", tempc);
-					Build_Weather_Message(msg2, "Humi", humidity);
-					LCD_SetContent_Refresh(&hi2c1, &lcd_content, msg1, msg2);
-				}
-				else {
-					server_ready = false;
+			if (!server_ready) {
+				Try_Server_Connect(false);
+			}
+			if (server_ready) {
+				ErrorStatus build_status = Build_WeatherReportQuery((char*)send_buffer, &hcomm, tempc, humidity, device_id);
+				if (build_status != ERROR) {
+					ErrorStatus post_status = Http_Post_Url((char*)send_buffer, POST_SUCCESS);
+					if (post_status == SUCCESS){
+						meas_send_count++;
+						Build_Weather_Message(msg1, "Temp", tempc);
+						Build_Weather_Message(msg2, "Humi", humidity);
+						LCD_SetContent_Refresh(&hi2c1, &lcd_content, msg1, msg2);
+					}
+					else {
+						server_ready = false;
+					}
 				}
 			}
 		}
@@ -737,19 +789,10 @@ void Meas_Task(void* arg)
 }
 
 //----- functions
-BaseType_t Lwesp_Init(void)
+BaseType_t ESP32AT_InitWrapper(void)
 {
-	if (lwesp_initialized) {
-		return pdPASS;
-	}
-
 	ESP32AT_SetUart(&huart2);
-	lwespr_t res = lwesp_init(NULL, 1);
-	if (res == lwespOK) {
-		lwesp_initialized = true;
-		return pdPASS;
-	}
-	return pdFAIL;
+	return ESP32AT_Init(WIFI_SSID, WIFI_PASS, WAIT_RES_TIMEOUTMS) ? pdPASS : pdFAIL;
 }
 
 BaseType_t Server_Conn(CommHandle_t *hcomm)
@@ -759,38 +802,27 @@ BaseType_t Server_Conn(CommHandle_t *hcomm)
 	}
 
 	if (Post_Login(hcomm) != SUCCESS){
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "postlogin fail", ".");
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "PostLoginFail.", "");
 		printf("post login failed\n");
 		return pdFAIL;
 	}
 
-	if (mqtt_client == NULL) {
-		mqtt_client = lwesp_mqtt_client_api_new(512, 512);
-		if (mqtt_client == NULL) {
-			LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTAllocFail", ".");
-			return pdFAIL;
-		}
-	} else {
-		lwesp_mqtt_client_api_close(mqtt_client);
+	if (!MQTT_ENABLED) {
+		return pdPASS;
 	}
-
-	lwesp_mqtt_client_info_t info;
-	memset(&info, 0, sizeof(info));
-	info.id = "123";
-	info.user = "123";
-	info.pass = "123";
-	info.keep_alive = 60;
-	info.use_ssl = 0;
-
-	lwesp_port_t port = (lwesp_port_t)atoi(hcomm ->MQTTPort);
+	uint16_t port = (uint16_t)atoi(hcomm ->MQTTPort);
 	if (port == 0) {
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTPortFail", ".");
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTPortFail.", "");
 		return pdFAIL;
 	}
-	lwesp_mqtt_conn_status_t conn_status = lwesp_mqtt_client_api_connect(
-			mqtt_client, hcomm ->ServerIp, port, &info);
-	if (conn_status != LWESP_MQTT_CONN_STATUS_ACCEPTED) {
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTConnFail", ".");
+
+	if (!ESP32AT_MqttConfig("123", "123", "123", 60)) {
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTConfigFail.", "");
+		return pdFAIL;
+	}
+
+	if (!ESP32AT_MqttConnect(hcomm ->ServerIp, port, WAIT_RES_TIMEOUTMS)) {
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTConnFail.", "");
 		printf("mqtt conn failed\n");
 		return pdFAIL;
 	}
@@ -802,8 +834,8 @@ BaseType_t Server_Conn(CommHandle_t *hcomm)
 	len += strlen(SUFFIX_REQ);
 	send_buffer[len++] = '\0';
 
-	if (lwesp_mqtt_client_api_subscribe(mqtt_client, (char*)send_buffer, LWESP_MQTT_QOS_AT_LEAST_ONCE) != lwespOK) {
-		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTSubFail", ".");
+	if (!ESP32AT_MqttSubscribe((char*)send_buffer, 1, WAIT_RES_TIMEOUTMS)) {
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "MQTTSubFail.", "");
 		printf("mqtt sub failed\n");
 		return pdFAIL;
 	}
@@ -813,7 +845,7 @@ BaseType_t Server_Conn(CommHandle_t *hcomm)
 	len += strlen(SUFFIX_RES);
 	send_buffer[len++] = '\0';
 
-	if (lwesp_mqtt_client_api_subscribe(mqtt_client, (char*)send_buffer, LWESP_MQTT_QOS_AT_LEAST_ONCE) != lwespOK) {
+	if (!ESP32AT_MqttSubscribe((char*)send_buffer, 1, WAIT_RES_TIMEOUTMS)) {
 		printf("mqtt sub failed\n");
 		return pdFAIL;
 	}
@@ -876,6 +908,25 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 	portYIELD_FROM_ISR(higherPriority);
 }
 
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+	if (huart == NULL || huart->Instance != USART2) {
+		return;
+	}
+
+	/* Clear UART error flags and restart RX DMA to avoid stuck receive path. */
+	__HAL_UART_CLEAR_OREFLAG(huart);
+	__HAL_UART_CLEAR_FEFLAG(huart);
+	__HAL_UART_CLEAR_NEFLAG(huart);
+	__HAL_UART_CLEAR_PEFLAG(huart);
+	uart2_rx_restart = true;
+	if (recv_htask != NULL) {
+		BaseType_t higherPriority = pdFALSE;
+		xTaskNotifyFromISR(recv_htask, 0, eNoAction, &higherPriority);
+		portYIELD_FROM_ISR(higherPriority);
+	}
+}
+
 void Build_Weather_Message(char* msg, const char* prefix, uint8_t value)
 {
 	int len = strlen(prefix);
@@ -884,6 +935,123 @@ void Build_Weather_Message(char* msg, const char* prefix, uint8_t value)
 	msg[len++] = value / 10 + '0';
 	msg[len++] = value % 10 + '0';
 	msg[len++] = '\0';
+}
+
+static void Ble_Apply_Ip(const char* ip, bool persist, bool reconnect)
+{
+	if (!ConfigStorage_IsValidIp(ip)) {
+		return;
+	}
+
+	if (config_mutex != NULL) {
+		xSemaphoreTake(config_mutex, portMAX_DELAY);
+	}
+
+	strncpy(pending_server_ip, ip, sizeof(pending_server_ip) - 1);
+	pending_server_ip[sizeof(pending_server_ip) - 1] = '\0';
+	pending_ip_persist = persist;
+	pending_ip_reconnect = reconnect;
+	pending_ip_update = true;
+
+	if (config_mutex != NULL) {
+		xSemaphoreGive(config_mutex);
+	}
+}
+
+static bool Apply_Server_Ip_Internal(const char* ip, bool persist, bool reconnect)
+{
+	if (!ConfigStorage_IsValidIp(ip)) {
+		return false;
+	}
+
+	if (config_mutex != NULL) {
+		xSemaphoreTake(config_mutex, portMAX_DELAY);
+	}
+
+	server_ready = false;
+
+	if (!Build_Http_Urls(ip)) {
+		if (config_mutex != NULL) {
+			xSemaphoreGive(config_mutex);
+		}
+		return false;
+	}
+
+	Build_CommHandle(&hcomm, http_device_url, http_weather_url, server_ip, mqtt_port, device_id, &htim13);
+
+	if (persist) {
+		ConfigStorage_SaveIp(ip);
+	}
+
+	if (reconnect) {
+		Post_Logout(&hcomm);
+		BaseType_t conn_res = Server_Conn(&hcomm);
+		if (conn_res == pdPASS) {
+			server_ready = true;
+		}
+	}
+
+	if (config_mutex != NULL) {
+		xSemaphoreGive(config_mutex);
+	}
+
+	return true;
+}
+
+static bool Build_Http_Urls(const char* ip)
+{
+	if (!ConfigStorage_IsValidIp(ip)) {
+		return false;
+	}
+
+	strncpy(server_ip, ip, sizeof(server_ip) - 1);
+	server_ip[sizeof(server_ip) - 1] = '\0';
+
+	int device_len = snprintf(http_device_url, sizeof(http_device_url), "http://%s:%s%s",
+			server_ip, HTTP_PORT_STR, HTTP_DEVICE_PATH);
+	if (device_len <= 0 || device_len >= (int)sizeof(http_device_url)) {
+		return false;
+	}
+
+	int weather_len = snprintf(http_weather_url, sizeof(http_weather_url), "http://%s:%s%s",
+			server_ip, HTTP_PORT_STR, HTTP_WEATHER_PATH);
+	if (weather_len <= 0 || weather_len >= (int)sizeof(http_weather_url)) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool Try_Server_Connect(bool sync_time)
+{
+	static bool ble_started = false;
+
+	if (sync_time) {
+		LCD_SetContent_Refresh(&hi2c1, &lcd_content, "Init...", ".");
+	}
+
+	if (ESP32AT_InitWrapper() != pdPASS) {
+		server_ready = false;
+		return false;
+	}
+
+	if (!ble_started) {
+		Ble_Config_Init();
+		ble_started = true;
+	}
+
+	if (Server_Conn(&hcomm) != pdPASS) {
+		server_ready = false;
+		return false;
+	}
+
+	server_ready = true;
+
+	if (sync_time) {
+		Web_Fetch_Time(&hcomm, &query_time);
+	}
+
+	return true;
 }
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char * pcTaskName )

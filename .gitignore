@@ -77,3 +77,10 @@ ctrlp.root
 .metadata/
 .settings/
 *.ld
+
+# Assistant and OpenSpec
+AGENTS.md
+openspec/
+
+# Local config
+Core/Inc/local_config.h

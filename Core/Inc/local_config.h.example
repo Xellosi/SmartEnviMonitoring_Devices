@@ -1,0 +1,20 @@
+/*
+ * Local configuration overrides. Copy to local_config.h and edit values.
+ * This file is an example and is safe to commit.
+ */
+#ifndef INC_LOCAL_CONFIG_H_
+#define INC_LOCAL_CONFIG_H_
+
+#define WIFI_SSID "your-ssid"
+#define WIFI_PASS "your-pass"
+
+#define DEFAULT_SERVER_IP "192.168.50.135"
+#define DEFAULT_MQTT_PORT "1883"
+
+#define HTTP_PORT_STR "8080"
+#define HTTP_DEVICE_PATH "/api/device"
+#define HTTP_WEATHER_PATH "/api/weather"
+
+#define MQTT_ENABLED 0
+
+#endif /* INC_LOCAL_CONFIG_H_ */

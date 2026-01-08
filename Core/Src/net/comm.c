@@ -13,8 +13,7 @@
 #include "stm32f4xx.h"
 #include "comm.h"
 #include "utils.h"
-#include "lwesp/lwesp_netconn.h"
-#include "lwesp/lwesp_pbuf.h"
+#include "esp32at.h"
 
 const char DATETIME_SP[] = "T";
 const char DATE_SP[] = "-";
@@ -33,10 +32,9 @@ const char HUMIDITY[] = "HUMIDITY";
 
 const char POST_SUCCESS[] = "succ";
 
-#define HTTP_REQ_BUFFER_SIZE 384
 #define HTTP_RESP_BUFFER_SIZE 512
 #define HTTP_DEFAULT_PORT 80
-#define HTTP_TIMEOUT_MS 5000
+#define HTTP_TIMEOUT_MS 2000
 
 typedef struct {
 	char host[64];
@@ -46,6 +44,7 @@ typedef struct {
 
 static ErrorStatus Http_Parse_Url(const char* url, HttpUrlParts* parts);
 static const char* Http_Find_Body(char* response);
+static bool Http_Map_Method(const char* method, Esp32AtHttpMethod* out);
 static ErrorStatus Http_Request(const char* method, const char* url, const char* body, size_t body_len,
 		char* response, size_t response_len, const char** out_body);
 
@@ -199,6 +198,34 @@ static const char* Http_Find_Body(char* response)
 	return body + 4;
 }
 
+static bool Http_Map_Method(const char* method, Esp32AtHttpMethod* out)
+{
+	if (method == NULL || out == NULL) {
+		return false;
+	}
+	if (strcmp(method, "GET") == 0) {
+		*out = ESP32AT_HTTP_METHOD_GET;
+		return true;
+	}
+	if (strcmp(method, "POST") == 0) {
+		*out = ESP32AT_HTTP_METHOD_POST;
+		return true;
+	}
+	if (strcmp(method, "PUT") == 0) {
+		*out = ESP32AT_HTTP_METHOD_PUT;
+		return true;
+	}
+	if (strcmp(method, "DELETE") == 0) {
+		*out = ESP32AT_HTTP_METHOD_DELETE;
+		return true;
+	}
+	if (strcmp(method, "HEAD") == 0) {
+		*out = ESP32AT_HTTP_METHOD_HEAD;
+		return true;
+	}
+	return false;
+}
+
 static ErrorStatus Http_Request(const char* method, const char* url, const char* body, size_t body_len,
 		char* response, size_t response_len, const char** out_body)
 {
@@ -211,74 +238,20 @@ static ErrorStatus Http_Request(const char* method, const char* url, const char*
 		return ERROR;
 	}
 
-	lwesp_netconn_p conn = lwesp_netconn_new(LWESP_NETCONN_TYPE_TCP);
-	if (conn == NULL) {
+	Esp32AtHttpMethod http_method;
+	if (!Http_Map_Method(method, &http_method)) {
 		return ERROR;
 	}
 
-	lwesp_netconn_set_receive_timeout(conn, HTTP_TIMEOUT_MS);
-	if (lwesp_netconn_connect(conn, parts.host, parts.port) != lwespOK) {
-		lwesp_netconn_delete(conn);
+	int status_code = 0;
+	size_t recv_len = ESP32AT_HttpClientRequest(http_method, url, body, body_len,
+			response, response_len, &status_code, HTTP_TIMEOUT_MS);
+	if (recv_len == 0) {
 		return ERROR;
 	}
 
-	char request[HTTP_REQ_BUFFER_SIZE];
-	int req_len = snprintf(request, sizeof(request),
-			"%s %s HTTP/1.1\r\n"
-			"Host: %s\r\n"
-			"Connection: close\r\n"
-			"Content-Length: %lu\r\n"
-			"\r\n",
-			method, parts.path, parts.host, (unsigned long)body_len);
-	if (req_len <= 0 || (size_t)req_len >= sizeof(request)) {
-		lwesp_netconn_close(conn);
-		lwesp_netconn_delete(conn);
-		return ERROR;
-	}
-
-	if (lwesp_netconn_write_ex(conn, request, (size_t)req_len, LWESP_NETCONN_FLAG_FLUSH) != lwespOK) {
-		lwesp_netconn_close(conn);
-		lwesp_netconn_delete(conn);
-		return ERROR;
-	}
-
-	if (body != NULL && body_len > 0) {
-		if (lwesp_netconn_write_ex(conn, body, body_len, LWESP_NETCONN_FLAG_FLUSH) != lwespOK) {
-			lwesp_netconn_close(conn);
-			lwesp_netconn_delete(conn);
-			return ERROR;
-		}
-	}
-
-	size_t offset = 0;
-	while (offset + 1 < response_len) {
-		lwesp_pbuf_p pbuf = NULL;
-		lwespr_t res = lwesp_netconn_receive(conn, &pbuf);
-		if (res != lwespOK) {
-			if (pbuf != NULL) {
-				lwesp_pbuf_free(pbuf);
-			}
-			break;
-		}
-
-		size_t len = lwesp_pbuf_length(pbuf, 1);
-		size_t copy_len = len;
-		if (copy_len > (response_len - 1 - offset)) {
-			copy_len = response_len - 1 - offset;
-		}
-		if (copy_len > 0) {
-			lwesp_pbuf_copy(pbuf, response + offset, copy_len, 0);
-			offset += copy_len;
-		}
-		lwesp_pbuf_free(pbuf);
-	}
-	response[offset] = '\0';
-
-	lwesp_netconn_close(conn);
-	lwesp_netconn_delete(conn);
-
-	if (offset == 0) {
-		return ERROR;
+	if (status_code > 0 && (status_code < 200 || status_code >= 300)) {
+		printf("http status %d\n", status_code);
 	}
 
 	if (out_body != NULL) {
